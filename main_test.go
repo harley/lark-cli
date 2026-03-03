@@ -74,3 +74,41 @@ func TestRedactToken(t *testing.T) {
 		t.Fatalf("unexpected short-token redaction: %q", got)
 	}
 }
+
+func TestAppendQueryParams(t *testing.T) {
+	path, err := appendQueryParams("/open-apis/im/v1/chats?existing=1", map[string]interface{}{
+		"page_size": float64(5),
+		"has_more":  true,
+		"labels":    []interface{}{"a", "b"},
+	})
+	if err != nil {
+		t.Fatalf("append query params: %v", err)
+	}
+
+	u, err := url.Parse(path)
+	if err != nil {
+		t.Fatalf("parse path: %v", err)
+	}
+	query := u.Query()
+
+	if got := query.Get("existing"); got != "1" {
+		t.Fatalf("existing = %q", got)
+	}
+	if got := query.Get("page_size"); got != "5" {
+		t.Fatalf("page_size = %q", got)
+	}
+	if got := query.Get("has_more"); got != "true" {
+		t.Fatalf("has_more = %q", got)
+	}
+	labels := query["labels"]
+	if len(labels) != 2 || labels[0] != "a" || labels[1] != "b" {
+		t.Fatalf("labels = %#v", labels)
+	}
+}
+
+func TestAppendQueryParamsInvalidType(t *testing.T) {
+	_, err := appendQueryParams("/open-apis/im/v1/chats", []interface{}{"bad"})
+	if err == nil {
+		t.Fatal("expected error for non-object params")
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -366,7 +367,11 @@ func runAPI(cfg rootConfig, args []string, stdin io.Reader) (interface{}, error)
 	out := map[string]interface{}{}
 	switch methodValue {
 	case "GET":
-		err = bot.GetAPIRequest("lark-cli", *path, *auth, params, &out)
+		requestPath, pathErr := appendQueryParams(*path, params)
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		err = bot.DoAPIRequest("GET", "lark-cli", requestPath, nil, *auth, nil, &out)
 	case "POST":
 		err = bot.PostAPIRequest("lark-cli", *path, *auth, params, &out)
 	case "PUT":
@@ -374,7 +379,11 @@ func runAPI(cfg rootConfig, args []string, stdin io.Reader) (interface{}, error)
 	case "PATCH":
 		err = bot.PatchAPIRequest("lark-cli", *path, *auth, params, &out)
 	case "DELETE":
-		err = bot.DeleteAPIRequest("lark-cli", *path, *auth, params, &out)
+		requestPath, pathErr := appendQueryParams(*path, params)
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		err = bot.DoAPIRequest("DELETE", "lark-cli", requestPath, nil, *auth, nil, &out)
 	default:
 		return nil, fmt.Errorf("unsupported method %q", methodValue)
 	}
@@ -558,6 +567,75 @@ func buildUsersListPath(departmentIDType, departmentID, userIDType, fields strin
 	}
 
 	return "/open-apis/contact/v3/users/find_by_department?" + values.Encode()
+}
+
+func appendQueryParams(rawPath string, params interface{}) (string, error) {
+	if params == nil {
+		return rawPath, nil
+	}
+
+	payload, ok := params.(map[string]interface{})
+	if !ok {
+		return "", errors.New("GET/DELETE --params must be a JSON object")
+	}
+	if len(payload) == 0 {
+		return rawPath, nil
+	}
+
+	parsed, err := url.Parse(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid path %q: %w", rawPath, err)
+	}
+
+	values := parsed.Query()
+	for key, raw := range payload {
+		name := strings.TrimSpace(key)
+		if name == "" || raw == nil {
+			continue
+		}
+
+		switch typed := raw.(type) {
+		case []interface{}:
+			for _, item := range typed {
+				encoded, valueErr := encodeQueryValue(item)
+				if valueErr != nil {
+					return "", fmt.Errorf("invalid query param %q: %w", name, valueErr)
+				}
+				values.Add(name, encoded)
+			}
+		default:
+			encoded, valueErr := encodeQueryValue(typed)
+			if valueErr != nil {
+				return "", fmt.Errorf("invalid query param %q: %w", name, valueErr)
+			}
+			values.Set(name, encoded)
+		}
+	}
+
+	parsed.RawQuery = values.Encode()
+	return parsed.String(), nil
+}
+
+func encodeQueryValue(value interface{}) (string, error) {
+	switch typed := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return typed, nil
+	case bool:
+		return strconv.FormatBool(typed), nil
+	case float64:
+		if typed == float64(int64(typed)) {
+			return strconv.FormatInt(int64(typed), 10), nil
+		}
+		return strconv.FormatFloat(typed, 'f', -1, 64), nil
+	default:
+		data, err := json.Marshal(typed)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
 }
 
 func uniqueUsers(items []userProfile) []userProfile {
