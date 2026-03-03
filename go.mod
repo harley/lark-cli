@@ -1,4 +1,4 @@
-module lark-cli
+module github.com/harley/lark-cli
 
 go 1.25.5
 

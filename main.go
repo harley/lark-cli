@@ -54,6 +54,7 @@ type userProfile struct {
 	Mobile          string   `json:"mobile,omitempty"`
 	MobileVisible   bool     `json:"mobile_visible,omitempty"`
 	OpenID          string   `json:"open_id,omitempty"`
+	UserID          string   `json:"user_id,omitempty"`
 	UnionID         string   `json:"union_id,omitempty"`
 	JobTitle        string   `json:"job_title,omitempty"`
 	DepartmentIDs   []string `json:"department_ids,omitempty"`
@@ -176,6 +177,7 @@ func runAuth(cfg rootConfig, args []string) (interface{}, error) {
 		fs := flag.NewFlagSet("tenant-token", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		refresh := fs.Bool("refresh", true, "force token refresh")
+		showToken := fs.Bool("show-token", false, "print full token value (default is redacted)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return nil, err
 		}
@@ -193,9 +195,15 @@ func runAuth(cfg rootConfig, args []string) (interface{}, error) {
 			return nil, fmt.Errorf("lark auth failed: code=%d msg=%s", resp.Code, resp.Msg)
 		}
 
+		token := resp.TenantAppAccessToken
+		if !*showToken {
+			token = redactToken(token)
+		}
+
 		return map[string]interface{}{
-			"tenant_access_token": resp.TenantAppAccessToken,
+			"tenant_access_token": token,
 			"expire_seconds":      resp.Expire,
+			"token_redacted":      !*showToken,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown auth subcommand %q", args[0])
@@ -521,9 +529,7 @@ func fetchUsersPageWithRetry(bot *lark.Bot, path string, retries int, delay time
 				return resp, nil
 			}
 			if resp.Code == 2200 && attempt < retries {
-				if delay > 0 {
-					time.Sleep(delay)
-				}
+				time.Sleep(nextRetryDelay(attempt, delay))
 				continue
 			}
 			return resp, fmt.Errorf("lark users list failed: code=%d msg=%s", resp.Code, resp.Msg)
@@ -532,9 +538,7 @@ func fetchUsersPageWithRetry(bot *lark.Bot, path string, retries int, delay time
 		if attempt == retries {
 			return resp, err
 		}
-		if delay > 0 {
-			time.Sleep(delay)
-		}
+		time.Sleep(nextRetryDelay(attempt, delay))
 	}
 
 	return resp, errors.New("failed to fetch users page")
@@ -563,16 +567,18 @@ func uniqueUsers(items []userProfile) []userProfile {
 	for _, item := range items {
 		key := strings.TrimSpace(item.OpenID)
 		if key == "" {
+			key = strings.TrimSpace(item.UserID)
+		}
+		if key == "" {
 			key = strings.TrimSpace(item.UnionID)
 		}
 		if key == "" {
 			key = strings.ToLower(strings.TrimSpace(item.Email))
 		}
 		if key == "" {
-			key = strings.ToLower(strings.TrimSpace(item.Name)) + "|" + strings.TrimSpace(item.Mobile)
-		}
-		if key == "" {
-			key = fmt.Sprintf("anonymous-%d", len(unique))
+			// Preserve entries that do not include stable identifiers.
+			unique = append(unique, item)
+			continue
 		}
 
 		if _, exists := seen[key]; exists {
@@ -603,6 +609,42 @@ func sortUsers(users []userProfile) {
 		openIDJ := strings.TrimSpace(users[j].OpenID)
 		return openIDI < openIDJ
 	})
+}
+
+func nextRetryDelay(attempt int, base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+
+	// Exponential backoff capped at 8x base delay.
+	wait := base * time.Duration(1<<max(0, attempt-1))
+	maxWait := base * 8
+	if wait > maxWait {
+		wait = maxWait
+	}
+
+	// Add jitter in [-12.5%, +12.5%].
+	jitterSpan := wait / 4
+	if jitterSpan <= 0 {
+		return wait
+	}
+	jitter := time.Duration(time.Now().UnixNano()%int64(jitterSpan)) - (jitterSpan / 2)
+	wait += jitter
+	if wait <= 0 {
+		return base
+	}
+	return wait
+}
+
+func redactToken(token string) string {
+	s := strings.TrimSpace(token)
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 8 {
+		return "***redacted"
+	}
+	return s[:8] + "...redacted"
 }
 
 func normalizedDomain(value string) (string, error) {
@@ -721,6 +763,7 @@ Commands:
 
 Examples:
   lark-cli auth tenant-token
+  lark-cli auth tenant-token --show-token
   lark-cli msg text --to-type chat_id --to oc_xxx --text "hello"
   lark-cli msg send --input @message.json
   lark-cli api call --method GET --path /open-apis/im/v1/chats --params '{"page_size": 20}'

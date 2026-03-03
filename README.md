@@ -36,6 +36,7 @@ Environment variables:
 
 ```bash
 lark-cli auth tenant-token
+lark-cli auth tenant-token --show-token
 lark-cli msg text --to-type chat_id --to oc_xxx --text "hello"
 lark-cli msg send --input @message.json
 lark-cli api call --method GET --path /open-apis/im/v1/chats --params '{"page_size": 20}'
@@ -45,6 +46,7 @@ lark-cli users list --department-id 0 --fields name,email,department_ids
 ## Notes
 
 - Default output is JSON, designed for agent/tool consumption.
+- `auth tenant-token` redacts token output by default; use `--show-token` to print the full value.
 - `msg send` accepts `--input -` (stdin), inline JSON, or `@file`.
 - `api call` supports `GET|POST|PUT|PATCH|DELETE`.
 - `users list` fetches paginated org members from Contact API with retry handling.

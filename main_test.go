@@ -38,15 +38,17 @@ func TestUniqueUsers(t *testing.T) {
 	input := []userProfile{
 		{OpenID: "ou_1", Name: "Alpha"},
 		{OpenID: "ou_1", Name: "Alpha Dup"},
-		{Email: "example@coderpush.com", Name: "EmailUser"},
-		{Email: "EXAMPLE@coderpush.com", Name: "EmailUser Dup"},
+		{UserID: "u_1", Name: "UserIDUser"},
+		{UserID: "u_1", Name: "UserIDUser Dup"},
+		{Email: "user@example.com", Name: "EmailUser"},
+		{Email: "USER@example.com", Name: "EmailUser Dup"},
 		{Name: "Fallback", Mobile: "123"},
 		{Name: "Fallback", Mobile: "123"},
 	}
 
 	output := uniqueUsers(input)
-	if len(output) != 3 {
-		t.Fatalf("expected 3 unique users, got %d", len(output))
+	if len(output) != 5 {
+		t.Fatalf("expected 5 unique users, got %d", len(output))
 	}
 }
 
@@ -61,5 +63,14 @@ func TestSortUsers(t *testing.T) {
 
 	if input[0].Email != "a@example.com" || input[1].Email != "b@example.com" || input[2].Email != "z@example.com" {
 		t.Fatalf("unexpected sort order: %#v", input)
+	}
+}
+
+func TestRedactToken(t *testing.T) {
+	if got := redactToken("token123456789"); got != "token123...redacted" {
+		t.Fatalf("unexpected redaction: %q", got)
+	}
+	if got := redactToken("abcd"); got != "***redacted" {
+		t.Fatalf("unexpected short-token redaction: %q", got)
 	}
 }
