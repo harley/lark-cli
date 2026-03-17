@@ -1,0 +1,11 @@
+version = 1
+output = "json"
+
+[profiles.onboard]
+output = "json"
+
+[profiles.onboard.lark]
+app_id_env = "ONBOARD_LARK_APP_ID"
+app_secret_env = "ONBOARD_LARK_APP_SECRET"
+domain = "lark"
+user_id_type = "open_id"

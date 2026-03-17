@@ -22,11 +22,15 @@ const (
 )
 
 type rootConfig struct {
-	AppID      string
-	AppSecret  string
-	Domain     string
-	OutputMode string
-	UserIDType string
+	AppID        string
+	AppSecret    string
+	AppIDEnv     string
+	AppSecretEnv string
+	Domain       string
+	OutputMode   string
+	UserIDType   string
+	ConfigPath   string
+	Profile      string
 }
 
 type envelope struct {
@@ -132,30 +136,76 @@ func run(args []string, stdout io.Writer, stderr io.Writer, stdin io.Reader) int
 }
 
 func parseRootFlags(args []string) (rootConfig, []string, error) {
+	fs := flag.NewFlagSet("lark-cli", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var (
+		appIDFlag      string
+		appSecretFlag  string
+		domainFlag     string
+		outputFlag     string
+		userIDTypeFlag string
+		configPathFlag string
+		profileFlag    string
+	)
+	fs.StringVar(&appIDFlag, "app-id", "", "Lark app ID")
+	fs.StringVar(&appSecretFlag, "app-secret", "", "Lark app secret")
+	fs.StringVar(&domainFlag, "domain", "", "Domain: feishu, lark, or full base URL")
+	fs.StringVar(&outputFlag, "output", "", "Output mode: json or text")
+	fs.StringVar(&userIDTypeFlag, "user-id-type", "", "Preferred user id type")
+	fs.StringVar(&configPathFlag, "config", "", "Config path (default: ~/.lark-cli/config.toml)")
+	fs.StringVar(&profileFlag, "profile", "", "Profile name")
+
+	if err := fs.Parse(args); err != nil {
+		return rootConfig{}, nil, err
+	}
+
+	visited := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) {
+		visited[f.Name] = true
+	})
+
+	resolvedConfigPath, configRequired := resolveConfigPath(configPathFlag)
+	fileCfg, configExists, err := loadCLIConfig(resolvedConfigPath, configRequired)
+	if err != nil {
+		return rootConfig{}, nil, err
+	}
+
+	activeProfile, err := resolveActiveCLIProfile(fileCfg, configExists, profileFlag)
+	if err != nil {
+		return rootConfig{}, nil, err
+	}
+
 	cfg := rootConfig{
-		AppID:      strings.TrimSpace(os.Getenv("LARK_APP_ID")),
-		AppSecret:  strings.TrimSpace(os.Getenv("LARK_APP_SECRET")),
-		Domain:     strings.TrimSpace(os.Getenv("LARK_DOMAIN")),
-		OutputMode: strings.TrimSpace(os.Getenv("LARK_OUTPUT")),
-		UserIDType: strings.TrimSpace(os.Getenv("LARK_USER_ID_TYPE")),
+		AppIDEnv:     fallbackNonEmpty(activeProfile.Lark.AppIDEnv, defaultProfileAppIDEnv(activeProfile.Name)),
+		AppSecretEnv: fallbackNonEmpty(activeProfile.Lark.AppSecretEnv, defaultProfileAppSecretEnv(activeProfile.Name)),
+		Domain:       strings.TrimSpace(activeProfile.Lark.Domain),
+		OutputMode:   strings.TrimSpace(activeProfile.Output),
+		UserIDType:   strings.TrimSpace(activeProfile.Lark.UserIDType),
+		ConfigPath:   resolvedConfigPath,
+		Profile:      activeProfile.Name,
+	}
+	cfg.AppID = strings.TrimSpace(os.Getenv(cfg.AppIDEnv))
+	cfg.AppSecret = strings.TrimSpace(os.Getenv(cfg.AppSecretEnv))
+
+	if visited["app-id"] {
+		cfg.AppID = strings.TrimSpace(appIDFlag)
+	}
+	if visited["app-secret"] {
+		cfg.AppSecret = strings.TrimSpace(appSecretFlag)
+	}
+	if visited["domain"] {
+		cfg.Domain = strings.TrimSpace(domainFlag)
+	}
+	if visited["output"] {
+		cfg.OutputMode = strings.TrimSpace(outputFlag)
+	}
+	if visited["user-id-type"] {
+		cfg.UserIDType = strings.TrimSpace(userIDTypeFlag)
 	}
 
 	if cfg.OutputMode == "" {
 		cfg.OutputMode = "json"
 	}
-
-	fs := flag.NewFlagSet("lark-cli", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.StringVar(&cfg.AppID, "app-id", cfg.AppID, "Lark app ID (or LARK_APP_ID)")
-	fs.StringVar(&cfg.AppSecret, "app-secret", cfg.AppSecret, "Lark app secret (or LARK_APP_SECRET)")
-	fs.StringVar(&cfg.Domain, "domain", cfg.Domain, "Domain: feishu, lark, or full base URL")
-	fs.StringVar(&cfg.OutputMode, "output", cfg.OutputMode, "Output mode: json or text")
-	fs.StringVar(&cfg.UserIDType, "user-id-type", cfg.UserIDType, "Preferred user id type")
-
-	if err := fs.Parse(args); err != nil {
-		return cfg, nil, err
-	}
-
 	cfg.OutputMode = strings.ToLower(strings.TrimSpace(cfg.OutputMode))
 	if cfg.OutputMode != "json" && cfg.OutputMode != "text" {
 		return cfg, nil, fmt.Errorf("invalid output mode %q (expected json or text)", cfg.OutputMode)
@@ -213,7 +263,7 @@ func runAuth(cfg rootConfig, args []string) (interface{}, error) {
 
 func runMsg(cfg rootConfig, args []string, stdin io.Reader) (interface{}, error) {
 	if len(args) == 0 {
-		return nil, errors.New("missing msg subcommand (expected: text or send)")
+		return nil, errors.New("missing msg subcommand (expected: text, send, or update)")
 	}
 
 	switch args[0] {
@@ -313,6 +363,48 @@ func runMsg(cfg rootConfig, args []string, stdin io.Reader) (interface{}, error)
 			"message_id": resp.Data.MessageID,
 			"chat_id":    resp.Data.ChatID,
 			"msg_type":   resp.Data.MsgType,
+		}, nil
+
+	case "update":
+		fs := flag.NewFlagSet("msg update", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		messageID := fs.String("message-id", "", "Message ID to update")
+		msgType := fs.String("msg-type", "", "Message type: text|post|interactive")
+		text := fs.String("text", "", "Replacement text content (text messages only)")
+		input := fs.String("input", "", "JSON source for an OutcomingMessage payload: inline JSON, '-', or '@path/to/file.json'")
+		if err := fs.Parse(args[1:]); err != nil {
+			return nil, err
+		}
+
+		if strings.TrimSpace(*messageID) == "" {
+			return nil, errors.New("msg update requires --message-id")
+		}
+
+		message, err := buildUpdateMessage(*msgType, *text, *input, stdin)
+		if err != nil {
+			return nil, err
+		}
+
+		bot, err := newChatBot(cfg)
+		if err != nil {
+			return nil, err
+		}
+		if err := primeTenantToken(bot); err != nil {
+			return nil, err
+		}
+
+		resp, err := bot.UpdateMessage(strings.TrimSpace(*messageID), message)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Code != 0 {
+			return nil, fmt.Errorf("lark msg update failed: code=%d msg=%s", resp.Code, resp.Msg)
+		}
+
+		return map[string]interface{}{
+			"message_id": strings.TrimSpace(*messageID),
+			"msg_type":   message.MsgType,
+			"updated":    true,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown msg subcommand %q", args[0])
@@ -496,10 +588,10 @@ func runUsers(cfg rootConfig, args []string) (interface{}, error) {
 
 func newChatBot(cfg rootConfig) (*lark.Bot, error) {
 	if strings.TrimSpace(cfg.AppID) == "" {
-		return nil, errors.New("missing app id: use --app-id or LARK_APP_ID")
+		return nil, fmt.Errorf("missing app id: use --app-id or %s", fallbackNonEmpty(cfg.AppIDEnv, "LARK_APP_ID"))
 	}
 	if strings.TrimSpace(cfg.AppSecret) == "" {
-		return nil, errors.New("missing app secret: use --app-secret or LARK_APP_SECRET")
+		return nil, fmt.Errorf("missing app secret: use --app-secret or %s", fallbackNonEmpty(cfg.AppSecretEnv, "LARK_APP_SECRET"))
 	}
 
 	bot := lark.NewChatBot(cfg.AppID, cfg.AppSecret)
@@ -785,6 +877,42 @@ func readInput(input string, stdin io.Reader) ([]byte, error) {
 	}
 }
 
+func buildUpdateMessage(msgType string, text string, input string, stdin io.Reader) (lark.OutcomingMessage, error) {
+	if strings.TrimSpace(input) != "" {
+		if strings.TrimSpace(text) != "" {
+			return lark.OutcomingMessage{}, errors.New("msg update accepts either --input or --text, not both")
+		}
+
+		raw, err := readInput(input, stdin)
+		if err != nil {
+			return lark.OutcomingMessage{}, err
+		}
+
+		var message lark.OutcomingMessage
+		if err := json.Unmarshal(raw, &message); err != nil {
+			return lark.OutcomingMessage{}, fmt.Errorf("invalid update message json: %w", err)
+		}
+		if strings.TrimSpace(message.MsgType) == "" {
+			return lark.OutcomingMessage{}, errors.New("msg update requires msg_type in payload")
+		}
+		return message, nil
+	}
+
+	if strings.TrimSpace(text) == "" {
+		return lark.OutcomingMessage{}, errors.New("msg update requires --text or --input")
+	}
+
+	resolvedType := strings.ToLower(strings.TrimSpace(msgType))
+	if resolvedType == "" {
+		resolvedType = lark.MsgText
+	}
+	if resolvedType != lark.MsgText {
+		return lark.OutcomingMessage{}, errors.New("msg update --text only supports --msg-type text")
+	}
+
+	return lark.NewMsgBuffer(lark.MsgText).Text(text).Build(), nil
+}
+
 func writeSuccess(w io.Writer, mode string, data interface{}) error {
 	switch mode {
 	case "json":
@@ -825,16 +953,19 @@ Usage:
   lark-cli [global-flags] <command> <subcommand> [flags]
 
 Global flags:
-  --app-id         Lark app ID (env: LARK_APP_ID)
-  --app-secret     Lark app secret (env: LARK_APP_SECRET)
+  --app-id         Lark app ID
+  --app-secret     Lark app secret
+  --config         config path (default: ~/.lark-cli/config.toml)
   --domain         lark | feishu | https://custom.domain
   --output         json | text (default: json)
+  --profile        profile name
   --user-id-type   custom user id type
 
 Commands:
   auth tenant-token
   msg text
   msg send
+  msg update
   api call
   users list
   version
@@ -844,6 +975,8 @@ Examples:
   lark-cli auth tenant-token --show-token
   lark-cli msg text --to-type chat_id --to oc_xxx --text "hello"
   lark-cli msg send --input @message.json
+  lark-cli msg update --message-id om_xxx --text "updated"
+  lark-cli --profile onboard auth tenant-token
   lark-cli api call --method GET --path /open-apis/im/v1/chats --params '{"page_size": 20}'
   lark-cli users list --department-id 0 --fields name,email,department_ids`)
 }
